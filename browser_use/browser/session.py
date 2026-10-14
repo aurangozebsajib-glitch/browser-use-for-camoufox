@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7str
 
 from browser_use.browser._cdp_timeout import TimeoutWrappedCDPClient
+from browser_use.browser.backends import BrowserBackend, CdpBackend
 from browser_use.browser.cloud.cloud import CloudBrowserAuthError, CloudBrowserClient, CloudBrowserError
 
 # CDP logging is now handled by setup_logging() in logging_config.py
@@ -498,6 +499,43 @@ class BrowserSession(BaseModel):
 		return self.browser_profile.is_local
 
 	@property
+	def _backend(self) -> BrowserBackend:
+		"""Get the backend selected for this browser profile."""
+		if self._backend_cached is None:
+			if self.browser_profile.channel == 'camoufox':
+				from browser_use.browser.backends import CamoufoxBackend
+
+				self._backend_cached = CamoufoxBackend(self.browser_profile)
+			else:
+				self._backend_cached = CdpBackend(self.browser_profile)
+		return self._backend_cached
+
+	async def launch(self):
+		return await self._backend.launch()
+
+	async def navigate(self, page_id: str, url: str):
+		return await self._backend.navigate(page_id, url)
+
+	async def get_dom_snapshot(self, page_id: str):
+		return await self._backend.get_dom_snapshot(page_id)
+
+	async def get_ax_tree(self, page_id: str):
+		return await self._backend.get_ax_tree(page_id)
+
+	async def screenshot(self, page_id: str):
+		return await self._backend.screenshot(page_id)
+
+	async def click(self, page_id: str, selector: str | None = None, x: int | None = None, y: int | None = None):
+		if x is not None and y is not None:
+			return await self._backend.click(page_id, selector=selector or '', x=x, y=y)
+		if selector:
+			return await self._backend.click(page_id, selector=selector)
+		raise ValueError('click() requires either a selector or x and y coordinates')
+
+	async def type_text(self, page_id: str, selector: str, text: str):
+		return await self._backend.type_text(page_id, selector, text)
+
+	@property
 	def is_cdp_connected(self) -> bool:
 		"""Check if the CDP WebSocket connection is alive and usable.
 
@@ -553,6 +591,7 @@ class BrowserSession(BaseModel):
 
 	# Mutable private state shared between watchdogs
 	_cdp_client_root: CDPClient | None = PrivateAttr(default=None)
+	_backend_cached: BrowserBackend | None = PrivateAttr(default=None)
 	_connection_lock: Any = PrivateAttr(default=None)  # asyncio.Lock for preventing concurrent connections
 
 	# PUBLIC: SessionManager instance (OWNS all targets and sessions)
@@ -660,6 +699,7 @@ class BrowserSession(BaseModel):
 				self.logger.debug(f'Error closing CDP client during reset: {e}')
 
 		self._cdp_client_root = None  # type: ignore
+		self._backend_cached = None
 		self._cached_browser_state_summary = None
 		self._cached_selector_map.clear()
 		self._cached_selector_indices.clear()
@@ -1343,8 +1383,11 @@ class BrowserSession(BaseModel):
 		assert self._cdp_client_root is not None, 'CDP client not initialized - browser may not be connected yet'
 		return self._cdp_client_root
 
-	async def new_page(self, url: str | None = None) -> 'Page':
+	async def new_page(self, url: str | None = None) -> 'Page | str':
 		"""Create a new page (tab)."""
+		if self.browser_profile.channel == 'camoufox':
+			return await self._backend.new_page(url or 'about:blank')
+
 		from cdp_use.cdp.target.commands import CreateTargetParameters
 
 		params: CreateTargetParameters = {'url': url or 'about:blank'}
